@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eigenmorph"
+version = "0.1.0"
+description = "Eigenvalue geometric features for cortical surface morphology analysis"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "rdneuro"},
+]
+keywords = [
+    "neuroscience", "neuroimaging", "cortical-morphology",
+    "eigenvalues", "surface-analysis", "freesurfer",
+    "point-cloud", "geometric-features", "brain-mri",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "matplotlib>=3.5",
+]
+
+[project.optional-dependencies]
+neuro = [
+    "nibabel>=4.0",
+]
+interactive = [
+    "fury>=0.9",
+    "imageio>=2.20",
+]
+embedding = [
+    "scikit-learn>=1.0",
+    "umap-learn>=0.5",
+]
+stats = [
+    "scikit-learn>=1.0",
+]
+all = [
+    "nibabel>=4.0",
+    "fury>=0.9",
+    "imageio>=2.20",
+    "scikit-learn>=1.0",
+    "umap-learn>=0.5",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "flake8>=6.0",
+    "black>=23.0",
+    "isort>=5.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/rdneuro/eigenmorph"
+Repository = "https://github.com/rdneuro/eigenmorph"
+Issues = "https://github.com/rdneuro/eigenmorph/issues"
+
+[tool.setuptools.packages.find]
+include = ["eigenmorph*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
