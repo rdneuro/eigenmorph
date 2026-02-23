@@ -89,8 +89,9 @@ def _mpl_surface(vertices, faces, face_rgba, title, save_path):
     ax.axis("off")
     ax.set_title(title, fontsize=14, fontweight="bold")
     plt.tight_layout()
+    fig.canvas.draw()          # force render before save (prevents blank output)
     if save_path:
-        fig.savefig(save_path)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
     return fig
 
 
@@ -169,7 +170,7 @@ def plot_rgb_identity(
             np.ones(mesh.n_faces)
         ])
         fig = _mpl_surface(mesh.vertices, mesh.faces, face_rgba,
-                           "Geometric Identity: L→R  P→G  S→B", save_path)
+                           "Geometric Identity: L→R  P→G  S→B", None)
         from matplotlib.patches import Patch
         ax = fig.axes[0]
         ax.legend(handles=[
@@ -177,6 +178,9 @@ def plot_rgb_identity(
             Patch(facecolor="green", label="Planarity (gyral crowns)"),
             Patch(facecolor="blue", label="Sphericity (sulcal pits)"),
         ], loc="lower left", fontsize=8)
+        if save_path:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
         return None
 
 
@@ -419,7 +423,7 @@ def plot_exploded_view(
         ])
         fig = _mpl_surface(displaced, mesh.faces, face_rgba,
                            f"Exploded View: {n_clusters} Geometric Communities",
-                           save_path)
+                           None)
         # Legend
         from matplotlib.patches import Patch
         ax = fig.axes[0]
@@ -428,6 +432,9 @@ def plot_exploded_view(
                   label=f"Type {c+1} ({(labels==c).sum():,} verts)")
             for c in range(n_clusters)
         ], loc="lower left", fontsize=7)
+        if save_path:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
         return labels, None
 
 
@@ -523,7 +530,8 @@ def plot_neighborhood_explorer(
         ax.axis("off")
         plt.tight_layout()
         if save_path:
-            fig.savefig(save_path)
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
         return None
 
 
