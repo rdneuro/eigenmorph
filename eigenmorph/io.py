@@ -6,7 +6,8 @@ eigenmorph.io
 Input/output for cortical surfaces and eigenvalue features.
 
 Supports FreeSurfer geometry, morphometry overlays, annotation files,
-GIFTI surfaces, and HDF5 serialisation of computed features.
+GIFTI surfaces, volumetric NIfTI/MGZ files (via marching cubes
+isosurface extraction), and NPZ serialisation of computed features.
 
 All loaders return ``SurfaceMesh`` objects or plain NumPy arrays,
 keeping the dependency footprint minimal (nibabel is optional but
@@ -185,6 +186,351 @@ def load_gifti_data(filepath: str) -> np.ndarray:
 
     gii = nib.load(filepath)
     return gii.darrays[0].data
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  VOLUMETRIC DATA → SURFACE MESH
+# ═══════════════════════════════════════════════════════════════════════════
+
+def load_volume_as_mesh(
+    filepath: str,
+    level: Optional[float] = None,
+    smooth_iter: int = 0,
+    step_size: int = 1,
+    label: Optional[int] = None,
+    apply_affine: bool = True,
+) -> SurfaceMesh:
+    """
+    Load a NIfTI / FreeSurfer volume and extract an isosurface mesh.
+
+    Uses the marching cubes algorithm to convert a 3D volume (binary mask,
+    probabilistic map, or label segmentation) into a triangulated surface
+    mesh in world (RAS) coordinates.  This enables eigenmorph analysis on
+    volumetric parcellations (e.g. ``aseg.mgz``, ``aparc+aseg.nii.gz``,
+    or any ``.nii.gz`` binary mask).
+
+    Parameters
+    ----------
+    filepath : str
+        Path to any nibabel-readable volume: ``.nii``, ``.nii.gz``,
+        ``.mgz``, ``.mgh``.
+    level : float, optional
+        Isosurface threshold for marching cubes.  If *None*, the
+        function uses the midpoint between the volume's nonzero minimum
+        and maximum, which works well for binary masks and probability
+        maps.  For label volumes, use the ``label`` parameter instead.
+    smooth_iter : int
+        Number of Laplacian smoothing iterations applied to the mesh
+        after extraction.  0 = no smoothing.  A value of 3-10 often
+        helps remove staircase artefacts from voxelised surfaces
+        without excessive shrinkage.
+    step_size : int
+        Step size for marching cubes (1 = full resolution, 2 = half,
+        etc.).  Larger values speed up extraction but produce coarser
+        meshes.
+    label : int, optional
+        If given, the volume is first binarised to keep only voxels
+        equal to this label.  Useful for extracting a single structure
+        from a label atlas (e.g. label 17 = left hippocampus in
+        FreeSurfer's ``aseg``).
+    apply_affine : bool
+        If True (default), transform vertices from voxel indices to
+        world (scanner RAS) coordinates using the volume's affine
+        matrix.  Set to False to keep vertices in voxel space.
+
+    Returns
+    -------
+    SurfaceMesh
+        Triangulated isosurface with vertices in mm (RAS) if
+        ``apply_affine=True``, or in voxel coordinates otherwise.
+
+    Raises
+    ------
+    ImportError
+        If nibabel or scikit-image is not installed.
+    ValueError
+        If the volume is empty after thresholding or label selection.
+
+    Examples
+    --------
+    Load a binary mask of a lesion and compute eigenfeatures::
+
+        mesh = em.io.load_volume_as_mesh("lesion_mask.nii.gz")
+        feats = em.compute_eigenfeatures(mesh, radius=3.0)
+
+    Extract left hippocampus (label 17) from FreeSurfer aseg::
+
+        mesh = em.io.load_volume_as_mesh(
+            "aseg.mgz", label=17, smooth_iter=5,
+        )
+
+    Load a probabilistic map with a custom threshold::
+
+        mesh = em.io.load_volume_as_mesh(
+            "prob_map.nii.gz", level=0.5,
+        )
+    """
+    try:
+        import nibabel as nib
+    except ImportError:
+        raise ImportError(
+            "nibabel is required for volume loading: pip install nibabel"
+        )
+    try:
+        from skimage.measure import marching_cubes
+    except ImportError:
+        raise ImportError(
+            "scikit-image is required for volume-to-mesh conversion: "
+            "pip install scikit-image"
+        )
+
+    # ── Load volume ──────────────────────────────────────────────────────
+    img = nib.load(filepath)
+    data = np.asarray(img.dataobj, dtype=np.float64)
+    affine = img.affine
+
+    # ── Optional label selection ─────────────────────────────────────────
+    if label is not None:
+        data = (data == label).astype(np.float64)
+
+    # ── Determine isosurface level ───────────────────────────────────────
+    nonzero = data[data > 0]
+    if nonzero.size == 0:
+        tag = f" (label={label})" if label is not None else ""
+        raise ValueError(
+            f"Volume '{filepath}'{tag} contains no nonzero voxels "
+            f"after thresholding."
+        )
+    if level is None:
+        vmin, vmax = float(nonzero.min()), float(nonzero.max())
+        if np.isclose(vmin, vmax):
+            # Binary mask or constant-valued region: threshold halfway
+            # between zero and the constant (e.g. 0.5 for a {0,1} mask)
+            level = 0.5 * vmax
+        else:
+            level = 0.5 * (vmin + vmax)
+
+    # ── Marching cubes ───────────────────────────────────────────────────
+    vertices, faces, normals, _ = marching_cubes(
+        data, level=level, step_size=step_size,
+    )
+
+    # ── Optional Laplacian smoothing ─────────────────────────────────────
+    if smooth_iter > 0:
+        vertices = _laplacian_smooth(vertices, faces, n_iter=smooth_iter)
+
+    # ── Affine: voxel → world (RAS mm) ──────────────────────────────────
+    if apply_affine:
+        # Homogeneous coordinates: append ones column, multiply, drop
+        ones = np.ones((vertices.shape[0], 1), dtype=np.float64)
+        vertices_h = np.hstack([vertices, ones])
+        vertices = (affine @ vertices_h.T).T[:, :3]
+
+    # ── Metadata ─────────────────────────────────────────────────────────
+    meta = {
+        "source": filepath,
+        "format": "volume_isosurface",
+        "level": float(level),
+        "smooth_iter": smooth_iter,
+        "step_size": step_size,
+        "apply_affine": apply_affine,
+        "voxel_size": np.abs(np.diag(affine[:3, :3])).tolist(),
+    }
+    if label is not None:
+        meta["label"] = label
+
+    return SurfaceMesh(
+        vertices=vertices,
+        faces=faces,
+        hemisphere="unknown",
+        surface_type="isosurface",
+        metadata=meta,
+    )
+
+
+def load_volume_labels_as_meshes(
+    filepath: str,
+    labels: Optional[list] = None,
+    label_names: Optional[Dict[int, str]] = None,
+    smooth_iter: int = 3,
+    step_size: int = 1,
+    min_voxels: int = 50,
+    apply_affine: bool = True,
+    verbose: bool = True,
+) -> Dict[int, SurfaceMesh]:
+    """
+    Extract one mesh per label from a multi-label segmentation volume.
+
+    Iterates over unique nonzero labels in the volume (or a user-supplied
+    subset) and calls :func:`load_volume_as_mesh` for each.  Useful for
+    batch-processing all structures in an ``aseg.mgz`` or an atlas
+    parcellation.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to label volume (``.nii``, ``.nii.gz``, ``.mgz``).
+    labels : list of int, optional
+        Specific labels to extract.  If *None*, all unique nonzero
+        values in the volume are used.
+    label_names : dict {int: str}, optional
+        Mapping from label integers to human-readable names, stored in
+        mesh metadata.
+    smooth_iter : int
+        Laplacian smoothing iterations per mesh.
+    step_size : int
+        Marching cubes step size.
+    min_voxels : int
+        Skip labels with fewer than this many voxels.
+    apply_affine : bool
+        Transform vertices to world (RAS) coordinates.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    dict {int: SurfaceMesh}
+        Meshes keyed by label integer.
+
+    Examples
+    --------
+    Extract all structures from FreeSurfer aseg::
+
+        meshes = em.io.load_volume_labels_as_meshes("aseg.mgz")
+        for lbl, mesh in meshes.items():
+            feats = em.compute_eigenfeatures(mesh, radius=3.0)
+    """
+    try:
+        import nibabel as nib
+    except ImportError:
+        raise ImportError("nibabel required: pip install nibabel")
+
+    img = nib.load(filepath)
+    data = np.asarray(img.dataobj)
+
+    # Discover labels
+    if labels is None:
+        labels = sorted(int(v) for v in np.unique(data) if v != 0)
+
+    if verbose:
+        print(f"  Extracting meshes from {len(labels)} labels in "
+              f"'{os.path.basename(filepath)}'")
+
+    meshes = {}
+    for lbl in labels:
+        n_vox = int((data == lbl).sum())
+        if n_vox < min_voxels:
+            if verbose:
+                name = (label_names or {}).get(lbl, "")
+                print(f"    Label {lbl:>5d} {name:>20s}: "
+                      f"{n_vox} voxels → skipped (< {min_voxels})")
+            continue
+
+        try:
+            mesh = load_volume_as_mesh(
+                filepath, label=lbl,
+                smooth_iter=smooth_iter,
+                step_size=step_size,
+                apply_affine=apply_affine,
+            )
+            if label_names and lbl in label_names:
+                mesh.metadata["label_name"] = label_names[lbl]
+
+            meshes[lbl] = mesh
+
+            if verbose:
+                name = (label_names or {}).get(lbl, "")
+                print(f"    Label {lbl:>5d} {name:>20s}: "
+                      f"{mesh.n_vertices:>7,} vertices, "
+                      f"{mesh.n_faces:>7,} faces")
+
+        except (ValueError, RuntimeError) as e:
+            if verbose:
+                print(f"    Label {lbl:>5d}: FAILED ({e})")
+
+    return meshes
+
+
+def _laplacian_smooth(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    n_iter: int = 3,
+    lam: float = 0.5,
+) -> np.ndarray:
+    """
+    Simple Laplacian smoothing on a triangle mesh.
+
+    Each vertex is moved toward the centroid of its immediate neighbors,
+    weighted by ``lam`` ∈ (0, 1).  This removes staircase artefacts from
+    marching cubes output without introducing external dependencies.
+
+    Parameters
+    ----------
+    vertices : (V, 3)
+    faces : (F, 3)
+    n_iter : int
+        Number of iterations.
+    lam : float
+        Smoothing weight per step (0 = no movement, 1 = full snap to
+        centroid).
+
+    Returns
+    -------
+    smoothed : (V, 3)
+    """
+    from collections import defaultdict
+
+    V = vertices.shape[0]
+    adj = defaultdict(set)
+    for f in faces:
+        for i in range(3):
+            for j in range(3):
+                if i != j:
+                    adj[f[i]].add(f[j])
+
+    smoothed = vertices.copy()
+    for _ in range(n_iter):
+        new_verts = smoothed.copy()
+        for v in range(V):
+            nbrs = adj[v]
+            if nbrs:
+                centroid = smoothed[list(nbrs)].mean(axis=0)
+                new_verts[v] = (1 - lam) * smoothed[v] + lam * centroid
+        smoothed = new_verts
+
+    return smoothed
+
+
+def load_surface(filepath: str, **kwargs) -> SurfaceMesh:
+    """
+    Auto-detect file format and load as SurfaceMesh.
+
+    Dispatches to the appropriate loader based on file extension:
+
+    - ``.nii``, ``.nii.gz``, ``.mgz``, ``.mgh`` → :func:`load_volume_as_mesh`
+    - ``.surf.gii`` or ``.gii`` → :func:`load_gifti_surface`
+    - everything else → :func:`load_freesurfer_surface`
+
+    Extra keyword arguments are forwarded to the detected loader.
+
+    Parameters
+    ----------
+    filepath : str
+    **kwargs
+        Passed to the specific loader (e.g. ``label``, ``smooth_iter``
+        for volumes).
+
+    Returns
+    -------
+    SurfaceMesh
+    """
+    lower = filepath.lower()
+    if lower.endswith((".nii", ".nii.gz", ".mgz", ".mgh")):
+        return load_volume_as_mesh(filepath, **kwargs)
+    elif lower.endswith(".gii"):
+        return load_gifti_surface(filepath, **kwargs)
+    else:
+        return load_freesurfer_surface(filepath, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
